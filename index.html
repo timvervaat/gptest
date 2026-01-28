@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="UTF-8" />
+  <title>Financiële planningstool</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <!-- React + ReactDOM (CDN, GitHub Pages proof) -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+
+  <!-- Tailwind CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-100">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect } = React;
+
+    // ────────────────────────────────────────────────
+    // STAP 1 — FINANCIAL ENGINE (PURE FUNCTIONS)
+    // ────────────────────────────────────────────────
+
+    function calculateAnnualCashflow(year, incomes, expenses, assumptions) {
+      const activeIncomes = incomes.filter(i =>
+        year >= i.startYear && (!i.endYear || year <= i.endYear)
+      );
+
+      const activeExpenses = expenses.filter(e =>
+        year >= e.startYear && (!e.endYear || year <= e.endYear)
+      );
+
+      const income = activeIncomes.reduce((sum, i) => {
+        const growth = i.growthRate ? Math.pow(1 + i.growthRate / 100, year - i.startYear) : 1;
+        const base = i.frequency === 'monthly' ? i.amount * 12 : i.amount;
+        return sum + base * growth;
+      }, 0);
+
+      const expensesTotal = activeExpenses.reduce((sum, e) => {
+        const inflation = e.adjustForInflation
+          ? Math.pow(1 + assumptions.inflationRate / 100, year - e.startYear)
+          : 1;
+        const base = e.frequency === 'monthly' ? e.amount * 12 : e.amount;
+        return sum + base * inflation;
+      }, 0);
+
+      return {
+        income,
+        expenses: expensesTotal,
+        savings: income - expensesTotal
+      };
+    }
+
+    function projectNetWorth({ startYear, endYear, startNetWorth, incomes, expenses, assumptions }) {
+      const timeline = [];
+      let netWorth = startNetWorth;
+
+      for (let year = startYear; year <= endYear; year++) {
+        const cashflow = calculateAnnualCashflow(year, incomes, expenses, assumptions);
+        netWorth = netWorth * (1 + assumptions.investmentReturn / 100) + cashflow.savings;
+
+        timeline.push({
+          year,
+          cashflow,
+          netWorth,
+          savingsRate: cashflow.income > 0 ? (cashflow.savings / cashflow.income) * 100 : null
+        });
+      }
+
+      return timeline;
+    }
+
+    function findFireYear(timeline, target) {
+      const hit = timeline.find(y => y.netWorth >= target);
+      return hit ? hit.year : null;
+    }
+
+    function monthlySavingsFromCashflow(cashflow) {
+      return cashflow.savings / 12;
+    }
+
+    // ────────────────────────────────────────────────
+    // STAP 2 — UX STATUS FEEDBACK
+    // ────────────────────────────────────────────────
+
+    function getFinancialStatus({ monthlySavings, yearsToFire }) {
+      if (monthlySavings < 0) {
+        return { color: 'red', icon: '🚨', message: 'Je geeft meer uit dan je verdient' };
+      }
+      if (!yearsToFire || yearsToFire > 40) {
+        return { color: 'yellow', icon: '⚠️', message: 'Met dit tempo duurt FIRE erg lang' };
+      }
+      if (yearsToFire <= 20) {
+        return { color: 'green', icon: '🎉', message: 'Je ligt goed op schema voor FIRE' };
+      }
+      return { color: 'blue', icon: '👍', message: 'Je bent onderweg, maar er is ruimte voor optimalisatie' };
+    }
+
+    // ────────────────────────────────────────────────
+    // STAP 3 — SCENARIO CONFIG
+    // ────────────────────────────────────────────────
+
+    const SCENARIOS = {
+      conservative: {
+        label: 'Conservatief',
+        assumptions: { inflationRate: 3, investmentReturn: 4, safeWithdrawalRate: 4 }
+      },
+      base: {
+        label: 'Basis',
+        assumptions: { inflationRate: 2, investmentReturn: 7, safeWithdrawalRate: 4 }
+      },
+      optimistic: {
+        label: 'Optimistisch',
+        assumptions: { inflationRate: 2, investmentReturn: 9, safeWithdrawalRate: 4 }
+      }
+    };
+
+    // ────────────────────────────────────────────────
+    // STAP 4 — SVG NET WORTH CHART
+    // ────────────────────────────────────────────────
+
+    function NetWorthChart({ timeline, targetNetWorth }) {
+      if (!timeline || timeline.length === 0) return null;
+
+      const width = 600;
+      const height = 200;
+      const padding = 30;
+      const maxNetWorth = Math.max(targetNetWorth, ...timeline.map(y => y.netWorth));
+
+      const points = timeline.map((y, i) => {
+        const x = padding + (i / (timeline.length - 1)) * (width - padding * 2);
+        const yPos = height - padding - (y.netWorth / maxNetWorth) * (height - padding * 2);
+        return `${x},${yPos}`;
+      }).join(' ');
+
+      const targetY = height - padding - (targetNetWorth / maxNetWorth) * (height - padding * 2);
+
+      return (
+        <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-48 bg-gray-50 rounded border">
+          <line x1={padding} y1={targetY} x2={width - padding} y2={targetY} stroke="#22c55e" strokeDasharray="4" />
+          <polyline fill="none" stroke="#3b82f6" strokeWidth="3" points={points} />
+        </svg>
+      );
+    }
+
+    // ────────────────────────────────────────────────
+    // STAP 5 — CSV EXPORT
+    // ────────────────────────────────────────────────
+
+    function exportTimelineToCSV(timeline, meta = {}) {
+      const header = ['Jaar', 'Inkomen', 'Uitgaven', 'Savings', 'Vermogen'];
+      const rows = timeline.map(y => [
+        y.year,
+        y.cashflow.income,
+        y.cashflow.expenses,
+        y.cashflow.savings,
+        y.netWorth
+      ]);
+
+      const metaRows = Object.entries(meta).map(([k, v]) => [`# ${k}`, v]);
+      const csv = [...metaRows.map(r => r.join(',')), '', header.join(','), ...rows.map(r => r.join(','))].join('\n');
+
+      const blob = new Blob([csv], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'vermogensprojectie.csv';
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+
+    // ────────────────────────────────────────────────
+    // APP
+    // ────────────────────────────────────────────────
+
+    function App() {
+      const [incomeItems] = useState([
+        { id: 1, name: 'Salaris', amount: 80000, frequency: 'yearly', growthRate: 2, startYear: 2026 }
+      ]);
+
+      const [expenseItems] = useState([
+        { id: 1, name: 'Levensonderhoud', amount: 2500, frequency: 'monthly', startYear: 2026, adjustForInflation: true }
+      ]);
+
+      const [currentNetWorth, setCurrentNetWorth] = useState(20000);
+      const [targetNetWorth, setTargetNetWorth] = useState(1500000);
+
+      const [scenario, setScenario] = useState('base');
+      const [assumptions, setAssumptions] = useState(SCENARIOS.base.assumptions);
+
+      const [projections, setProjections] = useState(null);
+
+      useEffect(() => {
+        const startYear = new Date().getFullYear();
+        const timeline = projectNetWorth({
+          startYear,
+          endYear: startYear + 50,
+          startNetWorth: currentNetWorth,
+          incomes: incomeItems,
+          expenses: expenseItems,
+          assumptions
+        });
+
+        const fireYear = findFireYear(timeline, targetNetWorth);
+        const monthlySavings = monthlySavingsFromCashflow(timeline[0].cashflow);
+
+        setProjections({ timeline, fireYear, monthlySavings, yearsToFire: fireYear ? fireYear - startYear : null });
+      }, [incomeItems, expenseItems, assumptions, currentNetWorth, targetNetWorth]);
+
+      const status = projections ? getFinancialStatus(projections) : null;
+
+      return (
+        <div className="max-w-5xl mx-auto p-6 space-y-6">
+          <h1 className="text-2xl font-bold">Financiële planningstool</h1>
+
+          <div className="bg-white p-4 rounded shadow space-y-2">
+            <label className="text-sm">Scenario</label>
+            <select
+              value={scenario}
+              onChange={e => {
+                setScenario(e.target.value);
+                setAssumptions(SCENARIOS[e.target.value].assumptions);
+              }}
+              className="border rounded px-2 py-1"
+            >
+              {Object.entries(SCENARIOS).map(([k, s]) => (
+                <option key={k} value={k}>{s.label}</option>
+              ))}
+            </select>
+          </div>
+
+          {projections && (
+            <div className="bg-white p-4 rounded shadow space-y-4">
+              <NetWorthChart timeline={projections.timeline} targetNetWorth={targetNetWorth} />
+
+              <button
+                onClick={() => exportTimelineToCSV(projections.timeline, { Scenario: SCENARIOS[scenario].label })}
+                className="text-sm text-blue-600 underline"
+              >
+                📥 Exporteer CSV
+              </button>
+            </div>
+          )}
+
+          {status && (
+            <div className={`p-4 rounded bg-${status.color}-50 border-l-4 border-${status.color}-500`}>
+              <span className="text-lg mr-2">{status.icon}</span>{status.message}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
