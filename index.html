@@ -5,66 +5,30 @@
   <title>Financiële planningstool</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 
-  <!-- React + ReactDOM (CDN, GitHub Pages proof) -->
+  <!-- React (CDN, GitHub Pages proof) -->
   <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+
+  <!-- Babel -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
   <!-- Tailwind -->
   <script src="https://cdn.tailwindcss.com"></script>
 </head>
+
 <body class="bg-gray-100">
-<div id="root"></div>
+  <div id="root"></div>
 
 <script type="text/babel">
 const { useState, useEffect } = React;
 
-/*
-────────────────────────────────────────────────
-STAP 1 — NL BELASTING (vereenvoudigd)
-────────────────────────────────────────────────
-*/
-function calculateIncomeTaxNL(yearlyIncome, householdType = 'single') {
-  const income = householdType === 'fiscal-partner'
-    ? yearlyIncome * 2
-    : yearlyIncome;
+/* ─────────────────────────────
+   STAP 1 — FINANCIAL ENGINE
+───────────────────────────── */
 
-  let tax;
-  if (income <= 73031) tax = income * 0.3693;
-  else tax = 73031 * 0.3693 + (income - 73031) * 0.495;
-
-  // Heffingskortingen (indicatief)
-  let general = Math.max(0, 3070 - Math.max(0, income - 22660) * 0.06095);
-  let labor = Math.max(0, 5052 - Math.max(0, income - 37691) * 0.0651);
-
-  return Math.max(0, tax - general - labor);
-}
-
-/*
-────────────────────────────────────────────────
-STAP 2 — TOESLAGEN (vereenvoudigd)
-────────────────────────────────────────────────
-*/
-function calculateToeslagen({ yearlyIncome, childrenCount, householdType }) {
-  if (childrenCount === 0) return 0;
-  const income = householdType === 'fiscal-partner' ? yearlyIncome * 2 : yearlyIncome;
-
-  let total = childrenCount * 1200; // kinderbijslag
-  const threshold = householdType === 'fiscal-partner' ? 40000 : 30000;
-
-  if (income < threshold) total += childrenCount * 2500;
-  else if (income < threshold + 20000) {
-    total += childrenCount * 2500 * (1 - (income - threshold) / 20000);
-  }
-  return Math.max(0, total);
-}
-
-/*
-────────────────────────────────────────────────
-STAP 3 — FINANCIAL ENGINE
-────────────────────────────────────────────────
-*/
 function calculateAnnualCashflow(year, incomes, expenses, assumptions, householdType) {
   const grossIncome = incomes.reduce((sum, i) => {
+    if (year < i.startYear) return sum;
     const growth = Math.pow(1 + (i.growthRate || 0) / 100, year - i.startYear);
     const base = i.frequency === 'monthly' ? i.amount * 12 : i.amount;
     return sum + base * growth;
@@ -72,143 +36,194 @@ function calculateAnnualCashflow(year, incomes, expenses, assumptions, household
 
   const tax = calculateIncomeTaxNL(grossIncome, householdType);
   const toeslagen = calculateToeslagen({ yearlyIncome: grossIncome, childrenCount: assumptions.childrenCount, householdType });
+  const netIncome = grossIncome - tax + toeslagen;
 
-  const expensesTotal = expenses.reduce((sum, e) => {
-    const inflation = e.adjustForInflation ? Math.pow(1 + assumptions.inflationRate / 100, year - e.startYear) : 1;
+  const totalExpenses = expenses.reduce((sum, e) => {
+    if (year < e.startYear) return sum;
+    const inflation = e.adjustForInflation
+      ? Math.pow(1 + assumptions.inflationRate / 100, year - e.startYear)
+      : 1;
     const base = e.frequency === 'monthly' ? e.amount * 12 : e.amount;
     return sum + base * inflation;
   }, 0);
 
-  const netIncome = grossIncome - tax + toeslagen;
-
   return {
-    grossIncome,
-    tax,
-    toeslagen,
-    expenses: expensesTotal,
     income: netIncome,
-    savings: netIncome - expensesTotal
+    expenses: totalExpenses,
+    savings: netIncome - totalExpenses
   };
 }
 
-function projectNetWorth({ startYear, years, startNetWorth, incomes, expenses, assumptions, householdType }) {
+function projectNetWorth({ startYear, endYear, startNetWorth, incomes, expenses, assumptions, householdType }) {
   let netWorth = startNetWorth;
   const timeline = [];
 
-  for (let y = startYear; y < startYear + years; y++) {
-    const cashflow = calculateAnnualCashflow(y, incomes, expenses, assumptions, householdType);
+  for (let year = startYear; year <= endYear; year++) {
+    const cashflow = calculateAnnualCashflow(year, incomes, expenses, assumptions, householdType);
     netWorth = netWorth * (1 + assumptions.investmentReturn / 100) + cashflow.savings;
 
-    timeline.push({ year: y, cashflow, netWorth });
+    timeline.push({ year, cashflow, netWorth });
   }
+
   return timeline;
 }
 
-/*
-────────────────────────────────────────────────
-STAP 4 — FIRE & KPI's
-────────────────────────────────────────────────
-*/
 function findFireYear(timeline, target) {
   const hit = timeline.find(y => y.netWorth >= target);
   return hit ? hit.year : null;
 }
 
-function monthlySavingsFromCashflow(cf) {
-  return cf.savings / 12;
+/* ─────────────────────────────
+   STAP 6–17 — NL BELASTINGEN
+───────────────────────────── */
+
+function calculateIncomeTaxNL(income, householdType) {
+  const taxable = householdType === 'fiscal-partner' ? income * 2 : income;
+  let tax = taxable <= 73031
+    ? taxable * 0.3693
+    : 73031 * 0.3693 + (taxable - 73031) * 0.495;
+
+  let generalCredit = 3070;
+  if (taxable > 22660) {
+    generalCredit = Math.max(0, 3070 - (taxable - 22660) * 0.06095);
+  }
+
+  let laborCredit = 5052;
+  if (taxable > 37691) {
+    laborCredit = Math.max(0, 5052 - (taxable - 37691) * 0.0651);
+  }
+
+  return Math.max(0, tax - generalCredit - laborCredit);
 }
 
-function calculateFireTargetFromExpenses(expenses, swr) {
-  const yearly = expenses.reduce((s, e) => s + (e.frequency === 'monthly' ? e.amount * 12 : e.amount), 0);
-  return yearly / (swr / 100);
+function calculateToeslagen({ yearlyIncome, childrenCount, householdType }) {
+  if (!childrenCount) return 0;
+  const income = householdType === 'fiscal-partner' ? yearlyIncome * 2 : yearlyIncome;
+  const kinderbijslag = childrenCount * 1200;
+  const threshold = householdType === 'fiscal-partner' ? 40000 : 30000;
+  const kgb = income < threshold ? childrenCount * 2500 : 0;
+  return kinderbijslag + kgb;
 }
 
-/*
-────────────────────────────────────────────────
-STAP 5 — SVG CHART
-────────────────────────────────────────────────
-*/
-function NetWorthChart({ timeline, target }) {
-  if (!timeline.length) return null;
-  const w = 600, h = 200, p = 30;
-  const max = Math.max(target, ...timeline.map(t => t.netWorth));
+/* ─────────────────────────────
+   STAP 18–20 — HYPOTHEEK
+───────────────────────────── */
 
-  const pts = timeline.map((t, i) => {
-    const x = p + (i / (timeline.length - 1)) * (w - p * 2);
-    const y = h - p - (t.netWorth / max) * (h - p * 2);
-    return `${x},${y}`;
-  }).join(' ');
+function calculateMortgageMonthlyPayment({ principal, interestRate, remainingMonths, mortgageType }) {
+  const r = interestRate / 100 / 12;
+  if (mortgageType === 'interest-only') return principal * r;
+  return principal * (r * Math.pow(1 + r, remainingMonths)) / (Math.pow(1 + r, remainingMonths) - 1);
+}
 
+function mortgageToExpense(m) {
+  return {
+    id: m.id,
+    name: m.name,
+    amount: calculateMortgageMonthlyPayment(m),
+    frequency: 'monthly',
+    startYear: m.startYear,
+    adjustForInflation: false
+  };
+}
+
+/* ─────────────────────────────
+   STAP 21 — UI
+───────────────────────────── */
+
+function MortgageEditor({ mortgage, setMortgage }) {
   return (
-    <svg viewBox={`0 0 ${w} ${h}`} className="w-full bg-white border rounded">
-      <polyline fill="none" stroke="#3b82f6" strokeWidth="3" points={pts} />
-    </svg>
-  );
-}
+    <div className="bg-white p-4 rounded shadow space-y-2">
+      <h2 className="font-semibold">🏠 Hypotheek</h2>
 
-/*
-────────────────────────────────────────────────
-APP
-────────────────────────────────────────────────
-*/
-function App() {
-  const startYear = new Date().getFullYear();
+      <input className="border p-1 w-full" type="number" value={mortgage.principal}
+        onChange={e => setMortgage({ ...mortgage, principal: +e.target.value })} placeholder="Hoofdsom" />
 
-  const [householdType, setHouseholdType] = useState('single');
-  const [childrenCount, setChildrenCount] = useState(0);
+      <input className="border p-1 w-full" type="number" step="0.1" value={mortgage.interestRate}
+        onChange={e => setMortgage({ ...mortgage, interestRate: +e.target.value })} placeholder="Rente %" />
 
-  const [incomes] = useState([
-    { id: 1, amount: 80000, frequency: 'yearly', growthRate: 2, startYear }
-  ]);
-
-  const [expenses] = useState([
-    { id: 1, amount: 2500, frequency: 'monthly', startYear, adjustForInflation: true }
-  ]);
-
-  const [assumptions] = useState({ inflationRate: 2, investmentReturn: 7, safeWithdrawalRate: 4, childrenCount });
-  const [netWorth] = useState(20000);
-
-  const fireTarget = calculateFireTargetFromExpenses(expenses, assumptions.safeWithdrawalRate);
-
-  const timeline = projectNetWorth({
-    startYear,
-    years: 50,
-    startNetWorth: netWorth,
-    incomes,
-    expenses,
-    assumptions: { ...assumptions, childrenCount },
-    householdType
-  });
-
-  const fireYear = findFireYear(timeline, fireTarget);
-
-  return (
-    <div className="max-w-4xl mx-auto p-6 space-y-6">
-      <h1 className="text-2xl font-bold">Financiële planningstool</h1>
-
-      <div className="bg-white p-4 rounded shadow space-y-2">
-        <label>Huishouden</label>
-        <select value={householdType} onChange={e => setHouseholdType(e.target.value)} className="border p-1">
-          <option value="single">Single</option>
-          <option value="fiscal-partner">Fiscaal partner</option>
-        </select>
-
-        <label>Aantal kinderen</label>
-        <input type="number" min="0" value={childrenCount} onChange={e => setChildrenCount(+e.target.value || 0)} className="border p-1" />
-      </div>
-
-      <div className="bg-white p-4 rounded shadow">
-        <p><strong>FIRE-doel:</strong> €{Math.round(fireTarget).toLocaleString()}</p>
-        <p><strong>FIRE-jaar:</strong> {fireYear ?? 'niet binnen 50 jaar'}</p>
-      </div>
-
-      <NetWorthChart timeline={timeline} target={fireTarget} />
+      <select className="border p-1 w-full" value={mortgage.mortgageType}
+        onChange={e => setMortgage({ ...mortgage, mortgageType: e.target.value })}>
+        <option value="annuity">Annuïtair</option>
+        <option value="interest-only">Aflossingsvrij</option>
+      </select>
     </div>
   );
 }
 
-const root = ReactDOM.createRoot(document.getElementById('root'));
-root.render(<App />);
+/* ─────────────────────────────
+   APP
+───────────────────────────── */
+
+function App() {
+  const startYear = new Date().getFullYear();
+
+  const [income] = useState([
+    { id: 1, amount: 80000, frequency: 'yearly', growthRate: 2, startYear }
+  ]);
+
+  const [mortgage, setMortgage] = useState({
+    id: 1,
+    name: 'Hypotheek',
+    principal: 400000,
+    interestRate: 4.2,
+    mortgageType: 'annuity',
+    remainingMonths: 360,
+    startYear
+  });
+
+  const [expenses] = useState([
+    { id: 1, name: 'Leven', amount: 2500, frequency: 'monthly', startYear, adjustForInflation: true }
+  ]);
+
+  const [childrenCount, setChildrenCount] = useState(0);
+  const [householdType, setHouseholdType] = useState('single');
+  const [netWorth] = useState(20000);
+
+  const assumptions = { inflationRate: 2, investmentReturn: 7, childrenCount };
+
+  const allExpenses = [...expenses, mortgageToExpense(mortgage)];
+
+  const timeline = projectNetWorth({
+    startYear,
+    endYear: startYear + 40,
+    startNetWorth: netWorth,
+    incomes: income,
+    expenses: allExpenses,
+    assumptions,
+    householdType
+  });
+
+  const fireTarget = allExpenses.reduce((s, e) => s + e.amount * 12, 0) / 0.04;
+  const fireYear = findFireYear(timeline, fireTarget);
+
+  return (
+    <div className="max-w-3xl mx-auto p-6 space-y-4">
+      <h1 className="text-2xl font-bold">Financiële planningstool</h1>
+
+      <MortgageEditor mortgage={mortgage} setMortgage={setMortgage} />
+
+      <div className="bg-white p-4 rounded shadow space-y-2">
+        <label>Kinderen</label>
+        <input type="number" className="border p-1 w-full"
+          value={childrenCount} onChange={e => setChildrenCount(+e.target.value)} />
+
+        <label>Huishouden</label>
+        <select className="border p-1 w-full"
+          value={householdType} onChange={e => setHouseholdType(e.target.value)}>
+          <option value="single">Single</option>
+          <option value="fiscal-partner">Fiscaal partner</option>
+        </select>
+      </div>
+
+      <div className="bg-green-50 p-4 rounded">
+        <p>💰 Vermogen na 40 jaar: €{Math.round(timeline.at(-1).netWorth).toLocaleString()}</p>
+        <p>🔥 FIRE-jaar: {fireYear || 'niet bereikt'}</p>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
 </script>
 </body>
 </html>
